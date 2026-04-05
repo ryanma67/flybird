@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flappy Pixel - Pro Boss Edition</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+        body { margin: 0; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #050505; font-family: 'VT323', monospace; color: white; user-select: none; }
+        canvas { border: 4px solid #111; border-radius: 8px; box-shadow: 0 0 60px rgba(255, 0, 64, 0.2); image-rendering: pixelated; cursor: pointer; z-index: 1; }
+        body::after { content: " "; display: block; position: absolute; top: 0; left: 0; bottom: 0; right: 0; background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06)); z-index: 2; background-size: 100% 4px, 6px 100%; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    canvas.width = 360;
+    canvas.height = 600;
+
+    // --- GAME STATE ---
+    let state = "MENU"; 
+    let currentLevel = 1;
+    let gameSpeed = 4.0;
+    
+    let birdY = 250;
+    let velocity = 0;
+    const gravity = 0.28;
+    const jump = -6.0;
+    let score = 0;
+    let frameCount = 0;
+    
+    let pipes = [];
+    let coins = [];
+    let particles = [];
+    let ambientParticles = []; 
+    let trails = []; 
+    let popups = []; 
+    let firebombs = [];
+
+    // --- BOSS STATE ---
+    let boss = { active: false, x: 400, y: 300, timer: 1200, maxTimer: 1200, color: "#38b000", shootCooldown: 0 };
+
+    let groundOffset = 0;
+    let shakeAmount = 0;
+
+    // --- PERSISTENT DATA ---
+    let totalCoins = parseInt(localStorage.getItem("fp_coins_v13"));
+    if(isNaN(totalCoins)) totalCoins = 0; 
+    let highScore = parseInt(localStorage.getItem("fp_highscore")) || 0;
+    let unlockedSkins = JSON.parse(localStorage.getItem("fp_skins_v13")) || [0];
+    let currentSkinIndex = parseInt(localStorage.getItem("fp_skin_v13")) || 0;
+    let currentMapIndex = parseInt(localStorage.getItem("fp_map_v13")) || 0;
+    let isVIP = localStorage.getItem("fp_vip_v13") === "true"; 
+    const pScale = 2.5; 
+
+    // --- AUDIO ---
+    let audioCtx;
+    function initAudio() {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+    }
+    function playSound(type) {
+        if (!audioCtx || audioCtx.state === 'suspended') return;
+        const osc = audioCtx.createOscillator(); const gainNode = audioCtx.createGain();
+        osc.connect(gainNode); gainNode.connect(audioCtx.destination);
+        const now = audioCtx.currentTime;
+        if (type === "flap") {
+            osc.type = "sine"; osc.frequency.setValueAtTime(350, now); osc.frequency.exponentialRampToValueAtTime(700, now + 0.1);
+            gainNode.gain.setValueAtTime(0.3, now); gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+            osc.start(now); osc.stop(now + 0.1);
+        } else if (type === "coin") {
+            osc.type = "square"; osc.frequency.setValueAtTime(900, now); osc.frequency.setValueAtTime(1400, now + 0.1);
+            gainNode.gain.setValueAtTime(0.15, now); gainNode.gain.linearRampToValueAtTime(0, now + 0.2);
+            osc.start(now); osc.stop(now + 0.2);
+        } else if (type === "hit" || type === "boss_spawn") {
+            osc.type = "sawtooth"; osc.frequency.setValueAtTime(200, now); osc.frequency.exponentialRampToValueAtTime(10, now + 0.4);
+            gainNode.gain.setValueAtTime(0.5, now); gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+            osc.start(now); osc.stop(now + 0.4);
+        } else if (type === "shoot") {
+            osc.type = "square"; osc.frequency.setValueAtTime(400, now); osc.frequency.exponentialRampToValueAtTime(50, now + 0.25);
+            gainNode.gain.setValueAtTime(0.3, now); gainNode.gain.linearRampToValueAtTime(0, now + 0.25);
+            osc.start(now); osc.stop(now + 0.25);
+        } else if (type === "heavy_shoot") {
+            osc.type = "square"; osc.frequency.setValueAtTime(150, now); osc.frequency.exponentialRampToValueAtTime(30, now + 0.4);
+            gainNode.gain.setValueAtTime(0.5, now); gainNode.gain.linearRampToValueAtTime(0, now + 0.4);
+            osc.start(now); osc.stop(now + 0.4);
+        }
+    }
+
+    // --- MAPS ---
+    const MAPS = [
+        { name: "ORIGINAL 8-BIT", skyTop: "#4ec0ca", skyBot: "#4ec0ca", pipe: ["#543847", "#73bf2e", "#558022"], ground: ["#543847", "#ded895", "#e9e19e"], bgCol: "#4ec0ca", pCol: "#ded895" },
+        { name: "NEON DARK", skyTop: "#050011", skyBot: "#1a0033", pipe: ["#3a0ca3", "#f72585", "#110022"], ground: ["#000", "#4cc9f0", "#f72585"], bgCol: "#0a001a", pCol: "#f72585" },
+        { name: "TOXIC SEWER", skyTop: "#051100", skyBot: "#113300", pipe: ["#000", "#adff2f", "#114411"], ground: ["#000", "#adff2f", "#006400"], bgCol: "#0a1100", pCol: "#adff2f" },
+        { name: "CYBER GLITCH", skyTop: "#000011", skyBot: "#001a33", pipe: ["#00003a", "#00ffff", "#000011"], ground: ["#000", "#ff00ff", "#00ffff"], bgCol: "#00001a", pCol: "#00ffff" },
+        { name: "VOLCANIC DOOM", skyTop: "#3a0000", skyBot: "#ff3300", pipe: ["#2d0000", "#ff0000", "#590000"], ground: ["#1a0000", "#ff4500", "#8b0000"], bgCol: "#220000", pCol: "#ff4500" },
+        { name: "ARCTIC CHILL", skyTop: "#001f3f", skyBot: "#66b2ff", pipe: ["#002244", "#00ffff", "#005599"], ground: ["#001122", "#ffffff", "#cce6ff"], bgCol: "#001133", pCol: "#ffffff" }
+    ];
+
+    function spawnParticles(x, y, amount, color, spread = 3) {
+        for(let i = 0; i < amount; i++) particles.push({ x: x, y: y, vx: (Math.random() - 0.5) * spread, vy: (Math.random() - 0.5) * spread - 2, life: 1, color: color });
+    }
+
+    // --- CLASSIC SHAPES ONLY ---
+    const SHAPES = [
+        [ // 0: Classic Bird
+            ["      111111     ", "    1133332211   ", "   133333325221  ", "  13331111222121 ", " 133312222122221 ", " 144412222122221 ", " 144441111111111 ", "  14444441666661 ", "   1111111565651 ", "         1111111 "], 
+            ["      111111     ", "    1133332211   ", "   133333325221  ", "  13333333222121 ", " 111113333222221 ", "1222221333322221 ", "1444441441111111 ", " 111114441666661 ", "   1111111565651 ", "         1111111 "]
+        ],
+        [ // 1: Classic Pig
+            ["     11111       ", "   112222211     ", "  12222222441    ", " 122211112451    ", " 12216666122331  ", " 12216666123131  ", " 12221111223331  ", "  122222222111   ", "   111222111     ", "     11  11      "],
+            ["     11111       ", "   112222211     ", "  12222222441    ", " 122222222451    ", " 12222222222331  ", " 12211111223131  ", " 12166661123331  ", "  116666122111   ", "   111111111     ", "     11  11      "]
+        ]
+    ];
+
+    const BOSS_IDLE = [ "     11111       ", "   112222211     ", "  12222222441    ", " 122211112451    ", " 12210000122331  ", " 12210000123131  ", " 12221111223331  ", "  122222222111   ", "   111222111     ", "     11  11      "];
+    const BOSS_SHOOT = ["     11111       ", "   112222211     ", "  12222222441    ", " 122222222451    ", " 12222222222331  ", " 12211111223131  ", " 12100001123331  ", "  110000122111   ", "   111111111     ", "     11  11      "];
+
+    const R_COLORS = ["#fff", "#00b4d8", "#9d4edd", "#ffd500", "#ff0054", "RAINBOW"];
+    const R_NAMES = ["COMMON", "RARE", "EPIC", "LEGENDARY", "MYTHIC", "GOD TIER"];
+
+    // --- SKINS GENERATOR ---
+    const skins = [];
+    for (let i = 0; i < 20; i++) {
+        let name, cost, rarity, pal;
+        if (i === 0) { name = "Classic Bird"; cost = 0; rarity = 0; pal = ['#111', '#f4a261', '#e76f51', '#e9c46a', '#fff', '#fff']; }
+        else if (i === 1) { name = "Pink Flare"; cost = 500; rarity = 0; pal = ['#111', '#ff006e', '#c1121f', '#ffb703', '#fff', '#ffcbf2']; }
+        else if (i === 19) { name = "Rainbow Bird"; cost = 100000; rarity = 5; pal = ['#000', '#fff', '#fff', '#f8f9fa', '#ffd500', '#ffd500']; }
+        else {
+            rarity = Math.floor((i / 20) * 4) + 1; cost = 2000 + (i * 2500);
+            let baseHue = (i * 45) % 360; if(baseHue > 60 && baseHue < 300) baseHue = (baseHue % 60) + 300; 
+            pal = ['#111', `hsl(${baseHue}, 100%, 60%)`, `hsl(${(baseHue + 20) % 360}, 100%, 50%)`, `hsl(${(baseHue - 20 + 360) % 360}, 100%, 40%)`, '#fff', `hsl(${baseHue}, 100%, 85%)`];
+            name = `Avian Spec-${i}`; 
+        }
+        skins.push([name, cost, rarity, 0, pal]);
+    }
+
+    for (let i = 0; i < 20; i++) {
+        let name, cost, rarity, pal;
+        if (i === 0) { name = "Classic Pig"; cost = 500; rarity = 0; pal = ['#111', '#52b788', '#2d6a4f', '#74c69d', '#fff', '#b7e4c7']; }
+        else if (i === 1) { name = "Mud Boar"; cost = 1000; rarity = 0; pal = ['#111', '#9c6644', '#7f4f24', '#b08968', '#fff', '#ddb892']; }
+        else if (i === 19) { name = "Rainbow Pig"; cost = 100000; rarity = 5; pal = ['#000', '#fff', '#fff', '#f8f9fa', '#ffd500', '#ffd500']; }
+        else {
+            rarity = Math.floor((i / 20) * 4) + 1; cost = 2000 + (i * 2500);
+            let baseHue = 120 + ((i * 35) % 160); 
+            pal = ['#111', `hsl(${baseHue}, 80%, 50%)`, `hsl(${(baseHue + 30) % 360}, 80%, 40%)`, `hsl(${(baseHue - 30 + 360) % 360}, 90%, 60%)`, '#fff', `hsl(${baseHue}, 80%, 80%)`];
+            name = `Porcine Spec-${i}`; 
+        }
+        skins.push([name, cost, rarity, 1, pal]);
+    }
+
+    function getRainbowColor(offset) { return `hsl(${(frameCount * 4 + offset) % 360}, 100%, 50%)`; }
+
+    function drawAnimatedSprite(x, y, rotation, skinIndex) {
+        let skinDef = skins[skinIndex]; let shapeIdx = skinDef[3];
+        let speed = (state === "PLAYING" || state === "BOSS") ? 5 : 15;
+        let frameIndex = Math.floor(frameCount / speed) % SHAPES[shapeIdx].length;
+        let pattern = SHAPES[shapeIdx][frameIndex];
+        let isRainbow = skinDef[2] === 5; let pal = skinDef[4];
+
+        ctx.save(); ctx.translate(x + 20, y + 20); ctx.rotate(rotation);
+        ctx.shadowColor = isRainbow ? getRainbowColor(0) : pal[1]; ctx.shadowBlur = 18; 
+
+        let cols = pattern[0].length; let rows = pattern.length;
+        let offsetX = -(cols * pScale) / 2; let offsetY = -(rows * pScale) / 2;
+
+        for (let row = 0; row < rows; row++) {
+            for (let col = 0; col < cols; col++) {
+                let char = pattern[row][col];
+                if (char !== ' ') {
+                    if (isRainbow && char !== '1') ctx.fillStyle = getRainbowColor(col * 15 + row * 15);
+                    else ctx.fillStyle = pal[parseInt(char) - 1];
+                    ctx.fillRect(offsetX + col * pScale, offsetY + row * pScale, pScale, pScale);
+                }
+            }
+        }
+        ctx.restore();
+    }
+
+    function drawBoss() {
+        ctx.save(); ctx.translate(boss.x, boss.y);
+        ctx.shadowColor = boss.color; ctx.shadowBlur = 25;
+        let bossScale = 4;
+        let pattern = boss.shootCooldown > 0 ? BOSS_SHOOT : BOSS_IDLE;
+        let cols = pattern[0].length; let rows = pattern.length;
+        let offsetX = -(cols * bossScale) / 2; let offsetY = -(rows * bossScale) / 2;
+
+        const pigPal = { '1': '#003a1a', '2': '#2d6a4f', '3': '#40916c', '4': '#95d5b2', '5': '#fff', '0': '#ff0040' };
+
+        for (let row = 0; row < rows; row++) {
+            for (let col = 0; col < cols; col++) {
+                let char = pattern[row][col];
+                if (char !== ' ') {
+                    ctx.fillStyle = pigPal[char];
+                    ctx.fillRect(offsetX + col * bossScale, offsetY + row * bossScale, bossScale, bossScale);
+                }
+            }
+        }
+        ctx.restore();
+    }
+
+    function endGame() {
+        state = "GAMEOVER"; playSound("hit"); shakeAmount = 30; 
+        let isRainbow = skins[currentSkinIndex][2] === 5;
+        let explodeColor = isRainbow ? getRainbowColor(0) : (skins[currentSkinIndex][4][1] || "#fff");
+        spawnParticles(60 + 20, birdY + 20, 60, explodeColor, 15);
+        if (score > highScore) { highScore = score; localStorage.setItem("fp_highscore", highScore); }
+    }
+
+    function update() {
+        if (state === "PLAYING" || state === "BOSS") {
+            velocity += gravity; birdY += velocity;
+            let currentGap = Math.max(120, 160 - (score * 0.5) - (currentLevel * 2)); 
+
+            if (state === "PLAYING") {
+                gameSpeed = Math.min(6.5, 4.0 + (score * 0.005));
+
+                if (frameCount % Math.max(65, 110 - (currentLevel * 5)) === 0) {
+                    let h = Math.random() * (canvas.height - 220 - currentGap) + 60;
+                    pipes.push({ x: canvas.width, y: h, gap: currentGap, passed: false });
+                    coins.push({ x: canvas.width + 26, y: h + (currentGap/2), collected: false });
+                    if (Math.random() > 0.4) coins.push({ x: canvas.width + 80, y: h + (currentGap/2) + (Math.random()*60-30), collected: false });
+                }
+
+                if (score > 0 && score % 50 === 0 && !boss.active) {
+                    state = "BOSS"; boss.active = true; boss.timer = boss.maxTimer;
+                    boss.x = canvas.width + 100; boss.y = canvas.height / 2; boss.shootCooldown = 0;
+                    pipes = []; coins = [];
+                    playSound("boss_spawn"); shakeAmount = 30;
+                    popups.push({ x: canvas.width/2 - 70, y: 200, text: "PRO BOSS INC!", color: "#ff0040", life: 3.0 });
+                }
+            }
+
+            if (state === "BOSS") {
+                boss.timer--;
+                if (boss.x > 280) boss.x -= 2;
+                
+                // --- PRO BOSS MOVEMENT UPGRADE ---
+                if (boss.x <= 280) {
+                    boss.y += ((birdY + 20) - boss.y) * 0.15; 
+                    boss.y += Math.sin(frameCount * 0.2) * 8; 
+                }
+                
+                if (boss.shootCooldown > 0) boss.shootCooldown--;
+
+                // --- PRO BOSS COMBAT UPGRADE ---
+                if (frameCount % Math.max(25, 50 - (currentLevel * 6)) === 0 && boss.x <= 280) {
+                    let dx = (60+20) - boss.x; let dy = birdY - boss.y;
+                    let angle = Math.atan2(dy, dx);
+                    boss.shootCooldown = 25; 
+                    
+                    let attackType = Math.random();
+                    
+                    if (attackType < 0.1) {
+                        coins.push({ x: boss.x - 25, y: boss.y + 10, collected: false, vx: Math.cos(angle)*7, vy: Math.sin(angle)*7 });
+                    } else if (attackType < 0.4) {
+                        playSound("heavy_shoot");
+                        firebombs.push({ x: boss.x - 25, y: boss.y + 10, vx: Math.cos(angle)*(8 + currentLevel * 0.5), vy: Math.sin(angle)*(8 + currentLevel * 0.5), size: 35 });
+                        spawnParticles(boss.x - 25, boss.y + 10, 30, "#ff0040", 12);
+                        shakeAmount = 10;
+                    } else {
+                        playSound("shoot");
+                        for(let i = 0; i < 5; i++) {
+                            let spreadAngle = angle + ((i - 2) * 0.15); 
+                            firebombs.push({ x: boss.x - 25, y: boss.y + 10, vx: Math.cos(spreadAngle)*(6 + currentLevel * 0.6), vy: Math.sin(spreadAngle)*(6 + currentLevel * 0.6), size: 16 + Math.random() * 6 });
+                        }
+                        spawnParticles(boss.x - 25, boss.y + 10, 20, "#ff4500", 8); 
+                    }
+                }
+
+                if (boss.timer <= 0) {
+                    state = "PLAYING"; boss.active = false; currentLevel++; 
+                    playSound("hit"); shakeAmount = 25; spawnParticles(boss.x, boss.y, 100, "#38b000", 20);
+                    popups.push({ x: canvas.width/2 - 50, y: 200, text: "SURVIVED!", color: "#00ffcc", life: 4.0 });
+                    firebombs = []; 
+                }
+            }
+
+            for (let i = pipes.length - 1; i >= 0; i--) {
+                pipes[i].x -= gameSpeed; 
+                if (60 + 26 > pipes[i].x && 60 + 10 < pipes[i].x + 52) {
+                    if (birdY + 10 < pipes[i].y || birdY + 30 > pipes[i].y + pipes[i].gap) endGame();
+                }
+                if (!pipes[i].passed && pipes[i].x + 26 < 60) {
+                    score++; pipes[i].passed = true; playSound("coin");
+                    spawnParticles(60 + 20, birdY + 16, 5, MAPS[currentMapIndex].pCol, 2); 
+                    popups.push({ x: 80, y: birdY, text: "+1", color: "#fff", life: 1.0 });
+
+                    if (score >= 1000 && !isVIP) {
+                        isVIP = true; localStorage.setItem("fp_vip_v13", "true");
+                        playSound("hit"); shakeAmount = 15; spawnParticles(canvas.width/2, canvas.height/2, 80, "#f72585", 15);
+                        popups.push({ x: canvas.width/2 - 70, y: 150, text: "★ VIP UNLOCKED ★", color: "#f72585", life: 4.0 });
+                    }
+                }
+                if (pipes[i].x < -60) pipes.splice(i, 1);
+            }
+
+            for (let i = firebombs.length - 1; i >= 0; i--) {
+                firebombs[i].x += firebombs[i].vx; firebombs[i].y += firebombs[i].vy;
+                let dx = firebombs[i].x - (60 + 20); let dy = firebombs[i].y - (birdY + 20);
+                
+                let hitboxRadius = firebombs[i].size > 30 ? 28 : 22; 
+                if (Math.sqrt(dx*dx + dy*dy) < hitboxRadius) endGame(); 
+                
+                if (firebombs[i].x < -50 || firebombs[i].x > canvas.width + 50 || firebombs[i].y > canvas.height + 50 || firebombs[i].y < -50) firebombs.splice(i, 1);
+            }
+
+            for (let i = coins.length - 1; i >= 0; i--) {
+                let dx = coins[i].x - (60 + 20); let dy = coins[i].y - (birdY + 20);
+                let dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist < 80) { coins[i].x -= dx * 0.1; coins[i].y -= dy * 0.1; } 
+                else if (coins[i].vx) { coins[i].x += coins[i].vx; coins[i].y += coins[i].vy; } 
+                else { coins[i].x -= gameSpeed; }
+
+                if (dist < 25 && !coins[i].collected) {
+                    coins[i].collected = true; totalCoins += 5; 
+                    localStorage.setItem("fp_coins_v13", totalCoins); playSound("coin"); 
+                    spawnParticles(coins[i].x, coins[i].y, 10, "#ffd500", 4);
+                    popups.push({ x: coins[i].x, y: coins[i].y, text: "+5", color: "#ffd500", life: 1.0 });
+                }
+                if (coins[i].x < -20 || coins[i].collected) coins.splice(i, 1);
+            }
+
+            if (birdY > canvas.height - 50 || birdY < -20) endGame();
+            groundOffset -= gameSpeed; if (groundOffset <= -32) groundOffset = 0;
+
+            if(velocity < 0 && frameCount % 2 === 0) {
+                let isRainbow = skins[currentSkinIndex][2] === 5;
+                let c = isRainbow ? getRainbowColor(0) : (skins[currentSkinIndex][4][1] || "#fff");
+                trails.push({ x: 60 + 10, y: birdY + 20 + Math.random()*10, life: 1.0, color: c });
+            }
+        }
+
+        let map = MAPS[currentMapIndex];
+        if (Math.random() < 0.2) ambientParticles.push({ x: Math.random() * canvas.width, y: canvas.height, vx: 0, vy: -Math.random()*4-1, size: Math.random()*2+1, c: map.pCol });
+
+        for(let i = ambientParticles.length - 1; i >= 0; i--) {
+            ambientParticles[i].x += ambientParticles[i].vx; ambientParticles[i].y += ambientParticles[i].vy;
+            if (ambientParticles[i].y < -20 || ambientParticles[i].y > canvas.height + 20 || ambientParticles[i].x < -10) ambientParticles.splice(i, 1);
+        }
+
+        for(let i = particles.length - 1; i >= 0; i--) {
+            particles[i].x += particles[i].vx; particles[i].y += particles[i].vy; 
+            particles[i].vy += 0.2; particles[i].life -= 0.03;
+            if(particles[i].life <= 0) particles.splice(i, 1);
+        }
+
+        for(let i = popups.length - 1; i >= 0; i--) { popups[i].y -= 1.5; popups[i].life -= 0.02; if(popups[i].life <= 0) popups.splice(i, 1); }
+        for(let i = trails.length - 1; i >= 0; i--) { trails[i].x -= gameSpeed; trails[i].life -= 0.06; if(trails[i].life <= 0) trails.splice(i, 1); }
+
+        frameCount++;
+    }
+
+    function drawPixelPipe(x, y, h, isTop, map) {
+        let grad = ctx.createLinearGradient(x, 0, x + 52, 0);
+        grad.addColorStop(0, map.pipe[0]); grad.addColorStop(0.3, map.pipe[1]); grad.addColorStop(1, map.pipe[2]);
+        ctx.fillStyle = grad; ctx.fillRect(x, y, 52, h);
+        ctx.fillStyle = "#000"; ctx.fillRect(x, isTop ? y + h - 4 : y, 52, 4); 
+
+        let lipY = isTop ? y + h - 24 : y;
+        let gradLip = ctx.createLinearGradient(x - 4, 0, x + 56, 0);
+        gradLip.addColorStop(0, map.pipe[0]); gradLip.addColorStop(0.3, map.pipe[1]); gradLip.addColorStop(1, map.pipe[2]);
+        ctx.fillStyle = gradLip; ctx.fillRect(x - 4, lipY, 60, 24);
+        ctx.fillStyle = "#000"; ctx.fillRect(x - 4, isTop ? lipY : lipY + 20, 60, 4);
+        
+        ctx.strokeStyle = map.pipe[1]; ctx.lineWidth = 3;
+        ctx.shadowColor = map.pipe[1]; ctx.shadowBlur = 10;
+        ctx.strokeRect(x, y, 52, h); ctx.strokeRect(x - 4, lipY, 60, 24); ctx.shadowBlur = 0;
+    }
+
+    function draw() {
+        let map = MAPS[currentMapIndex];
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        
+        if (shakeAmount > 0) { ctx.translate((Math.random() - 0.5) * shakeAmount, (Math.random() - 0.5) * shakeAmount); shakeAmount *= 0.9; if(shakeAmount < 0.5) shakeAmount = 0; }
+
+        let bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        bgGrad.addColorStop(0, map.skyTop); 
+        bgGrad.addColorStop(1, map.skyBot);
+        ctx.fillStyle = bgGrad; 
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        if (state === "BOSS") {
+            let pulse = Math.abs(Math.sin(frameCount * 0.05)) * 0.25;
+            ctx.fillStyle = `rgba(255, 0, 0, ${0.1 + pulse})`; 
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        ambientParticles.forEach(p => { ctx.fillStyle = p.c; ctx.shadowColor = p.c; ctx.shadowBlur = 10; ctx.fillRect(p.x, p.y, p.size, p.size); ctx.shadowBlur = 0; }); 
+
+        if (state === "MENU") {
+            ctx.fillStyle = "white"; ctx.textAlign = "center";
+            ctx.font = "40px 'VT323'"; ctx.fillText("SKIN SHOP", canvas.width/2, 45);
+            ctx.font = "26px 'VT323'"; ctx.fillStyle = "#ffd500"; ctx.fillText(`COINS: ${totalCoins} $`, canvas.width/2, 75);
+            
+            if(isVIP) { ctx.fillStyle = "#f72585"; ctx.font = "28px 'VT323'"; ctx.fillText(`★ VIP ACTIVE ★`, canvas.width/2, 105); } 
+            else { ctx.fillStyle = "#2ecc71"; ctx.font = "22px 'VT323'"; ctx.fillText(`HIGH SCORE: ${highScore}`, canvas.width/2, 105); }
+
+            ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.fillRect(40, 130, 280, 70); ctx.strokeRect(40, 130, 280, 70);
+            ctx.fillStyle = "#fff"; ctx.font = "24px 'VT323'"; ctx.fillText("<", 60, 172); ctx.fillText(">", 300, 172);
+            ctx.font = "20px 'VT323'"; ctx.fillText(`MAP ${currentMapIndex + 1}/${MAPS.length}`, canvas.width/2, 155);
+            ctx.fillStyle = map.pCol; ctx.shadowColor = map.pCol; ctx.shadowBlur = 10; 
+            ctx.font = "28px 'VT323'"; ctx.fillText(map.name, canvas.width/2, 185); ctx.shadowBlur = 0;
+
+            ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.fillRect(20, 220, 320, 190); ctx.strokeRect(20, 220, 320, 190);
+            
+            ctx.fillStyle = "#fff"; ctx.font = "20px 'VT323'"; ctx.fillText(`SKIN ${currentSkinIndex + 1}/${skins.length}`, canvas.width/2, 245);
+            ctx.font = "32px 'VT323'"; ctx.fillText("<<", 50, 320); ctx.fillText("<", 90, 320); ctx.fillText(">", 270, 320); ctx.fillText(">>", 310, 320);
+            
+            let bobY = Math.sin(frameCount * 0.1) * 5; 
+            drawAnimatedSprite(canvas.width/2 - 20, 275 + bobY, 0, currentSkinIndex);
+            
+            let s = skins[currentSkinIndex]; let isUnlocked = unlockedSkins.includes(currentSkinIndex);
+            
+            ctx.fillStyle = s[2] === 5 ? getRainbowColor(0) : R_COLORS[s[2]]; 
+            ctx.font = "28px 'VT323'"; ctx.fillText(s[0], canvas.width/2, 355);
+            ctx.font = "18px 'VT323'"; ctx.fillText(`[ ${R_NAMES[s[2]]} ]`, canvas.width/2, 375);
+            
+            ctx.fillStyle = "white"; ctx.fillRect(100, 385, 160, 20);
+            
+            ctx.fillStyle = "#000"; ctx.font = "20px 'VT323'"; 
+            let priceText = isUnlocked ? "OWNED" : (isVIP ? "FREE (VIP)" : `${s[1]} $`);
+            if (!isUnlocked && isVIP) ctx.fillStyle = "#d00000"; 
+            ctx.fillText(priceText, canvas.width/2, 401);
+
+            ctx.fillStyle = isUnlocked ? "#2ecc71" : ((isVIP || totalCoins >= s[1]) ? "#f72585" : "#555");
+            ctx.fillRect(80, 440, 200, 60); ctx.strokeRect(80, 440, 200, 60);
+            ctx.fillStyle = "white"; ctx.font = "32px 'VT323'"; ctx.fillText(isUnlocked ? "START GAME" : "BUY SKIN", canvas.width/2, 480);
+
+        } else if (state === "PLAYING" || state === "BOSS" || state === "GAMEOVER") {
+            pipes.forEach(p => { drawPixelPipe(p.x, 0, p.y, true, map); drawPixelPipe(p.x, p.y + p.gap, canvas.height - (p.y + p.gap), false, map); });
+
+            if (state === "BOSS" && boss.active) {
+                drawBoss();
+                ctx.fillStyle = "#222"; ctx.fillRect(canvas.width/2 - 50, 40, 100, 10);
+                ctx.fillStyle = "#ff0040"; ctx.fillRect(canvas.width/2 - 50, 40, (boss.timer / boss.maxTimer) * 100, 10);
+                ctx.fillStyle = "#fff"; ctx.font = "20px 'VT323'"; ctx.fillText("BOSS HEALTH", canvas.width/2, 30);
+            }
+
+            firebombs.forEach(f => {
+                ctx.fillStyle = "#fff"; ctx.fillRect(f.x-f.size/2, f.y-f.size/2, f.size, f.size);
+                ctx.fillStyle = "#ff0040"; ctx.shadowColor = "#ff4500"; ctx.shadowBlur = 15;
+                ctx.fillRect(f.x-f.size/2 + 2, f.y-f.size/2 + 2, f.size-4, f.size-4); ctx.shadowBlur = 0;
+            });
+
+            coins.forEach(c => {
+                ctx.fillStyle = "#000"; ctx.fillRect(c.x-9, c.y-9, 18, 18); 
+                ctx.fillStyle = "#ffd500"; ctx.shadowColor = "#ffb703"; ctx.shadowBlur = 8;
+                ctx.fillRect(c.x-6, c.y-6, 12, 12); ctx.shadowBlur = 0; ctx.fillStyle = "#fff"; ctx.fillRect(c.x-2, c.y-4, 4, 8); 
+            });
+
+            trails.forEach(t => { ctx.globalAlpha = Math.max(0, t.life); ctx.fillStyle = t.color; ctx.shadowColor = t.color; ctx.shadowBlur = 10; ctx.fillRect(t.x, t.y, 10 * t.life, 4); }); ctx.globalAlpha = 1.0; ctx.shadowBlur = 0;
+            particles.forEach(p => { ctx.globalAlpha = Math.max(0, p.life); ctx.fillStyle = p.color; ctx.shadowColor = p.color; ctx.shadowBlur = 5; ctx.fillRect(p.x, p.y, p.size || 6, p.size || 6); }); ctx.globalAlpha = 1.0; ctx.shadowBlur = 0;
+
+            if(state === "PLAYING" || state === "BOSS") {
+                let rot = Math.min(Math.PI / 4, Math.max(-Math.PI / 4, velocity * 0.08));
+                drawAnimatedSprite(60, birdY, rot, currentSkinIndex);
+            }
+
+            popups.forEach(p => { ctx.globalAlpha = Math.max(0, p.life); ctx.fillStyle = p.color; ctx.shadowColor = p.color; ctx.shadowBlur = 5; ctx.font = "28px 'VT323'"; ctx.fillText(p.text, p.x, p.y); ctx.shadowBlur = 0; }); ctx.globalAlpha = 1.0;
+
+            if (state !== "BOSS") {
+                ctx.fillStyle = "white"; ctx.strokeStyle = "black"; ctx.lineWidth = 6; ctx.font = "70px 'VT323'"; ctx.textAlign = "center";
+                ctx.strokeText(score, canvas.width/2, 90); ctx.fillText(score, canvas.width/2, 90);
+            }
+            
+            if (!isVIP && (state === "PLAYING" || state === "BOSS")) {
+                ctx.fillStyle = state === "BOSS" ? "#fff" : map.pCol; ctx.font = "24px 'VT323'"; ctx.shadowColor = state === "BOSS" ? "#fff" : map.pCol; ctx.shadowBlur = 8;
+                ctx.fillText(`VIP Quest: Score ${score}/1000`, canvas.width/2, 130); ctx.shadowBlur = 0;
+            }
+        }
+
+        ctx.fillStyle = map.ground[0]; ctx.fillRect(0, canvas.height - 32, canvas.width, 32);
+        for(let i=0; i<canvas.width/8 + 4; i++) {
+            let gx = i * 8 + groundOffset;
+            ctx.fillStyle = map.ground[1]; ctx.fillRect(gx, canvas.height - 38, 8, 6); 
+            if (i % 4 === 0) { ctx.fillStyle = map.ground[2]; ctx.fillRect(gx, canvas.height - 32, 8, 32); } 
+        }
+        ctx.restore(); 
+
+        if (state === "GAMEOVER") {
+            ctx.fillStyle = "rgba(0,0,0,0.85)"; ctx.fillRect(0,0,canvas.width, canvas.height);
+            ctx.fillStyle = "white"; ctx.textAlign = "center";
+            ctx.font = "70px 'VT323'"; ctx.fillText("CRASHED!", canvas.width/2, 200);
+            ctx.fillStyle = "#ffd500"; ctx.font = "40px 'VT323'"; ctx.fillText(`SCORE: ${score}`, canvas.width/2, 260);
+            ctx.fillStyle = "#00ffcc"; ctx.font = "30px 'VT323'"; ctx.fillText(`LEVEL REACHED: ${currentLevel}`, canvas.width/2, 310);
+            ctx.fillStyle = "#2ecc71"; ctx.font = "25px 'VT323'"; ctx.fillText(`BEST SCORE: ${highScore}`, canvas.width/2, 350);
+            ctx.globalAlpha = Math.abs(Math.sin(frameCount * 0.05)); ctx.fillStyle = "white"; ctx.font = "26px 'VT323'"; ctx.fillText("TAP TO RESTART", canvas.width/2, 430); ctx.globalAlpha = 1.0;
+        }
+
+        update(); requestAnimationFrame(draw);
+    }
+
+    function handleAction(e) {
+        if(e && e.type === "touchstart") e.preventDefault();
+        initAudio();
+        let rect = canvas.getBoundingClientRect();
+        let x = e.clientX ? e.clientX - rect.left : (e.touches ? e.touches[0].clientX - rect.left : 0);
+        let y = e.clientY ? e.clientY - rect.top : (e.touches ? e.touches[0].clientY - rect.top : 0);
+        if (!x || !y) { x = canvas.width/2; y = canvas.height/2; }
+
+        if (state === "MENU") {
+            if (y > 130 && y < 200) {
+                if (x > 40 && x < 100) { currentMapIndex = (currentMapIndex - 1 + MAPS.length) % MAPS.length; playSound("flap"); }
+                else if (x > 260 && x < 320) { currentMapIndex = (currentMapIndex + 1) % MAPS.length; playSound("flap"); }
+                localStorage.setItem("fp_map_v13", currentMapIndex); ambientParticles = [];
+            }
+            else if (y > 280 && y < 350) {
+                if (x > 30 && x < 70) { currentSkinIndex = (currentSkinIndex - 10 + skins.length) % skins.length; playSound("flap"); } 
+                else if (x >= 70 && x < 120) { currentSkinIndex = (currentSkinIndex - 1 + skins.length) % skins.length; playSound("flap"); } 
+                else if (x > 240 && x <= 290) { currentSkinIndex = (currentSkinIndex + 1) % skins.length; playSound("flap"); } 
+                else if (x > 290 && x < 330) { currentSkinIndex = (currentSkinIndex + 10) % skins.length; playSound("flap"); } 
+                localStorage.setItem("fp_skin_v13", currentSkinIndex);
+            }
+            else if (x > 80 && x < 280 && y > 440 && y < 500) {
+                let s = skins[currentSkinIndex];
+                if (unlockedSkins.includes(currentSkinIndex)) {
+                    state = "PLAYING"; birdY = 250; velocity = jump; score = 0; 
+                    currentLevel = 1; gameSpeed = 4.0; boss.active = false;
+                    pipes = []; coins = []; particles = []; ambientParticles = []; trails = []; popups = []; firebombs = [];
+                    playSound("flap");
+                } else if (isVIP || totalCoins >= s[1]) {
+                    if (!isVIP) totalCoins -= s[1]; 
+                    unlockedSkins.push(currentSkinIndex);
+                    localStorage.setItem("fp_coins_v13", totalCoins); localStorage.setItem("fp_skins_v13", JSON.stringify(unlockedSkins));
+                    playSound("coin");
+                }
+            }
+        } else if (state === "PLAYING" || state === "BOSS") {
+            velocity = jump; playSound("flap");
+            let isRainbow = skins[currentSkinIndex][2] === 5;
+            let c = isRainbow ? getRainbowColor(0) : (skins[currentSkinIndex][4][1] || "#fff");
+            spawnParticles(60 + 10, birdY + 20, 4, c, 3);
+        } else if (state === "GAMEOVER" && shakeAmount < 5) { 
+            state = "MENU"; ambientParticles = []; trails = [];
+        }
+    }
+
+    window.addEventListener("mousedown", handleAction);
+    window.addEventListener("touchstart", handleAction, {passive: false});
+    window.addEventListener("keydown", (e) => { if(e.code === "Space") handleAction({}); });
+
+    draw();
+</script>
+</body>
+</html>
